@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meeting-minutes"
+version = "1.0.0"
+description = "会议纪要命令行工具 - 自动整理录音转写文本"
+requires-python = ">=3.9"
+dependencies = [
+    "click>=8.1",
+    "python-docx>=1.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+mm = "meeting_minutes.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["meeting_minutes*"]
