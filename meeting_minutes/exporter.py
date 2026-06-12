@@ -17,6 +17,11 @@ def export_markdown(minutes: MeetingMinutes) -> str:
         lines.append(f"**日期**：{minutes.date}")
     if minutes.attendees:
         lines.append(f"**参会人**：{', '.join(minutes.attendees)}")
+    speakers = minutes.speakers()
+    if speakers:
+        lines.append(f"**发言人**：{', '.join(speakers)}")
+    if minutes.source_file:
+        lines.append(f"**来源文件**：{minutes.source_file}")
     lines.append("")
 
     lines.append("---")
@@ -59,13 +64,24 @@ def export_markdown(minutes: MeetingMinutes) -> str:
     if minutes.todos:
         lines.append("## 待办事项")
         lines.append("")
-        lines.append("| # | 任务 | 责任人 | 截止时间 | 优先级 |")
-        lines.append("|---|------|--------|---------|--------|")
-        for i, todo in enumerate(minutes.todos, 1):
-            assignee = todo.assignee or "❌ 未指定"
-            deadline = todo.deadline or "❌ 未指定"
-            priority = todo.priority or "-"
-            lines.append(f"| {i} | {todo.task[:60]} | {assignee} | {deadline} | {priority} |")
+        has_meeting_source = any(t.meeting_source for t in minutes.todos)
+        if has_meeting_source:
+            lines.append("| # | 任务 | 责任人 | 截止时间 | 优先级 | 来源 |")
+            lines.append("|---|------|--------|---------|--------|------|")
+            for i, todo in enumerate(minutes.todos, 1):
+                assignee = todo.assignee or "❌ 未指定"
+                deadline = todo.deadline or "❌ 未指定"
+                priority = todo.priority or "-"
+                source = todo.meeting_source or "-"
+                lines.append(f"| {i} | {todo.task[:60]} | {assignee} | {deadline} | {priority} | {source} |")
+        else:
+            lines.append("| # | 任务 | 责任人 | 截止时间 | 优先级 |")
+            lines.append("|---|------|--------|---------|--------|")
+            for i, todo in enumerate(minutes.todos, 1):
+                assignee = todo.assignee or "❌ 未指定"
+                deadline = todo.deadline or "❌ 未指定"
+                priority = todo.priority or "-"
+                lines.append(f"| {i} | {todo.task[:60]} | {assignee} | {deadline} | {priority} |")
         lines.append("")
 
     if minutes.segments:
@@ -100,6 +116,9 @@ def export_word(minutes: MeetingMinutes, output_path: Path) -> Path:
         doc.add_paragraph(f"日期：{minutes.date}")
     if minutes.attendees:
         doc.add_paragraph(f"参会人：{', '.join(minutes.attendees)}")
+    speakers = minutes.speakers()
+    if speakers:
+        doc.add_paragraph(f"发言人：{', '.join(speakers)}")
 
     doc.add_paragraph("─" * 40)
 
@@ -134,10 +153,14 @@ def export_word(minutes: MeetingMinutes, output_path: Path) -> Path:
 
     if minutes.todos:
         doc.add_heading("待办事项", level=1)
-        table = doc.add_table(rows=1, cols=5)
+        has_meeting_source = any(t.meeting_source for t in minutes.todos)
+        cols = 6 if has_meeting_source else 5
+        table = doc.add_table(rows=1, cols=cols)
         table.style = "Table Grid"
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         headers = ["#", "任务", "责任人", "截止时间", "优先级"]
+        if has_meeting_source:
+            headers.append("来源")
         for i, header in enumerate(headers):
             cell = table.rows[0].cells[i]
             cell.text = header
@@ -152,6 +175,8 @@ def export_word(minutes: MeetingMinutes, output_path: Path) -> Path:
             row.cells[2].text = todo.assignee or "❌ 未指定"
             row.cells[3].text = todo.deadline or "❌ 未指定"
             row.cells[4].text = todo.priority or "-"
+            if has_meeting_source:
+                row.cells[5].text = todo.meeting_source or "-"
             if not todo.assignee or not todo.deadline:
                 for cell in row.cells:
                     for paragraph in cell.paragraphs:
