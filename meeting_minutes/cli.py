@@ -286,6 +286,9 @@ def todo(project: str, file: str, set_status, set_assignee, set_deadline, with_h
 
         text = minutes.cleaned_text or minutes.raw_text
 
+        existing_todos = list(minutes.todos) if minutes.todos else []
+        existing_map = {t.task_key(): t for t in existing_todos}
+
         project_history = None
         if with_history:
             processed_files = pm.list_minutes(project)
@@ -300,8 +303,42 @@ def todo(project: str, file: str, set_status, set_assignee, set_deadline, with_h
                     except Exception:
                         continue
 
-        todos = extract_todos(minutes.segments, text, project_history=project_history, current_meeting_title=minutes.title or file)
-        minutes.todos = todos
+        new_todos = extract_todos(minutes.segments, text, project_history=project_history, current_meeting_title=minutes.title or file)
+
+        merged_todos = []
+        for todo in new_todos:
+            key = todo.task_key()
+            if key in existing_map:
+                existing = existing_map[key]
+                if existing.status and existing.status != "待办":
+                    todo.status = existing.status
+                    todo.status_updated_at = existing.status_updated_at
+                if existing.history:
+                    todo.history = list(existing.history)
+                if existing.assignee and not todo.assignee:
+                    todo.assignee = existing.assignee
+                if existing.deadline and not todo.deadline:
+                    todo.deadline = existing.deadline
+                if existing.assignees:
+                    for a in existing.assignees:
+                        if a and a not in todo.get_all_assignees():
+                            todo.assignees.append(a)
+                if existing.deadlines:
+                    for d in existing.deadlines:
+                        if d and d not in todo.get_all_deadlines():
+                            todo.deadlines.append(d)
+                if existing.meeting_sources:
+                    for s in existing.meeting_sources:
+                        if s and s not in todo.get_all_sources():
+                            todo.meeting_sources.append(s)
+            merged_todos.append(todo)
+
+        for existing in existing_todos:
+            key = existing.task_key()
+            if not any(t.task_key() == key for t in merged_todos):
+                merged_todos.append(existing)
+
+        minutes.todos = merged_todos
 
         if set_status:
             idx = int(set_status[0])
@@ -323,13 +360,13 @@ def todo(project: str, file: str, set_status, set_assignee, set_deadline, with_h
 
         pm.save_minutes(project, minutes, file)
 
-        if not todos:
+        if not minutes.todos:
             console.print("[yellow]未识别到待办事项[/]")
             return
 
-        has_source = any(t.get_all_sources() for t in todos)
-        has_multiple = any(len(t.get_all_assignees()) > 1 or len(t.get_all_deadlines()) > 1 for t in todos)
-        has_status = any(t.status and t.status != "待办" for t in todos)
+        has_source = any(t.get_all_sources() for t in minutes.todos)
+        has_multiple = any(len(t.get_all_assignees()) > 1 or len(t.get_all_deadlines()) > 1 for t in minutes.todos)
+        has_status = any(t.status and t.status != "待办" for t in minutes.todos)
 
         status_map = {"待办": "⏳", "进行中": "🔄", "已完成": "✅", "延期": "⚠️", "取消": "❌"}
 
@@ -343,7 +380,7 @@ def todo(project: str, file: str, set_status, set_assignee, set_deadline, with_h
         if has_source:
             table.add_column("会议来源", style="magenta", width=20)
 
-        for i, t in enumerate(todos, 1):
+        for i, t in enumerate(minutes.todos, 1):
             status_icon = status_map.get(t.status, "")
             assignee = t.display_assignees() or "[red]❌ 缺失[/]"
             deadline = t.display_deadlines() or "[red]❌ 缺失[/]"
@@ -357,15 +394,15 @@ def todo(project: str, file: str, set_status, set_assignee, set_deadline, with_h
         console.print(table)
 
         checker = Checker()
-        issues = checker.check_todos(todos)
+        issues = checker.check_todos(minutes.todos)
         if issues:
             console.print(f"\n[yellow]⚠️ {len(issues)} 项待办缺少责任人或截止时间[/]")
             console.print(f"[dim]使用 mm review {project} -f {file} 可快速补全信息[/]")
 
-        has_status_changes = [t for t in todos if t.history]
+        has_status_changes = [t for t in minutes.todos if t.history]
         if has_status_changes:
             console.print(f"\n[cyan]📜 状态历史：[/]")
-            for t in todos:
+            for t in minutes.todos:
                 if t.history:
                     console.print(f"  - {t.task[:40]}")
                     for h in t.history[-3:]:
@@ -750,8 +787,12 @@ def search_cmd(keyword: str, project: Optional[str], date_from: Optional[str], d
         if output:
             out_path = Path(output)
         else:
-            safe_keyword = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', keyword[:30])
-            out_path = Path.cwd() / f"search_{safe_keyword}.md"
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if keyword:
+                safe_keyword = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', keyword[:20])
+                out_path = Path.cwd() / f"search_{safe_keyword}_{ts}.md"
+            else:
+                out_path = Path.cwd() / f"search_results_{ts}.md"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text("\n".join(md_lines), encoding="utf-8")
         console.print(f"\n[green]✅ 已导出到：{out_path}[/]")

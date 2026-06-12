@@ -136,7 +136,7 @@ class TodoItem:
         self.status_updated_at = now
         return True
 
-    def snapshot_history(self, meeting: str = ""):
+    def snapshot_history(self, meeting: str = "", note: str = ""):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         hist = TodoHistory(
             date=now,
@@ -144,7 +144,7 @@ class TodoItem:
             deadline=self.deadline,
             status=self.status,
             meeting=meeting,
-            note="合并/更新快照",
+            note=note or "合并/更新快照",
         )
         already_snap = any(
             h.date == now and h.status == self.status and h.meeting == meeting
@@ -271,15 +271,21 @@ class MeetingMinutes:
         if index < 1 or index > len(self.todos):
             return False
         todo = self.todos[index - 1]
-        if assignee is not None:
-            todo.assignee = assignee
-        if deadline is not None:
-            todo.deadline = deadline
+        changed = False
+        note = ""
         if status is not None:
             ok = todo.set_status(status, meeting=self.title)
-            if not ok:
-                return False
-        return True
+            if ok:
+                changed = True
+        if assignee is not None and assignee != todo.assignee:
+            todo.snapshot_history(meeting=self.title, note=f"责任人更新: {assignee}")
+            todo.assignee = assignee
+            changed = True
+        if deadline is not None and deadline != todo.deadline:
+            todo.snapshot_history(meeting=self.title, note=f"截止时间更新: {deadline}")
+            todo.deadline = deadline
+            changed = True
+        return changed
 
     def get_todos_by_status(self, status: str) -> List[TodoItem]:
         return [t for t in self.todos if t.status == status]

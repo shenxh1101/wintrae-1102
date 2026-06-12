@@ -92,17 +92,10 @@ class Searcher:
                 pass
 
             if date_from and dt_from:
-                if not date_parsed:
-                    if keyword_lower or assignee_lower or types:
-                        pass
-                    else:
-                        continue
-                elif date_parsed < dt_from:
+                if not date_parsed or date_parsed < dt_from:
                     continue
             if date_to and dt_to:
-                if not date_parsed:
-                    pass
-                elif date_parsed > dt_to:
+                if not date_parsed or date_parsed > dt_to:
                     continue
 
             try:
@@ -142,7 +135,7 @@ class Searcher:
         has_type_filter = type_set is not None
         has_keyword_filter = bool(keyword)
 
-        if has_assignee_filter and not has_type_filter:
+        if has_assignee_filter:
             type_set = {"待办"}
 
         for agenda_idx, agenda in enumerate(minutes.agendas, 1):
