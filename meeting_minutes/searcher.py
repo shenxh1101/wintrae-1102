@@ -33,10 +33,21 @@ class Searcher:
             )
             all_results.extend(project_results)
 
-        all_results.sort(
-            key=lambda r: r.get("date_parsed", datetime.min),
-            reverse=True
-        )
+        def sort_key(r):
+            try:
+                d = r.get("date_parsed")
+                if isinstance(d, datetime):
+                    return d
+                if isinstance(d, str) and d:
+                    try:
+                        return datetime.strptime(d, "%Y-%m-%d")
+                    except Exception:
+                        pass
+                return datetime.min
+            except Exception:
+                return datetime.min
+
+        all_results.sort(key=sort_key, reverse=True)
         return all_results
 
     def _search_in_project(
@@ -68,20 +79,39 @@ class Searcher:
                 continue
             try:
                 minutes = MeetingMinutes.from_json(filepath.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as e:
                 continue
 
             minutes.source_file = filepath.name
-            date_parsed = minutes.parse_date()
+            date_parsed = None
+            try:
+                date_str = MeetingMinutes.parse_date(minutes.date)
+                if date_str:
+                    date_parsed = datetime.strptime(date_str, "%Y-%m-%d")
+            except Exception:
+                pass
 
-            if date_from and dt_from and date_parsed and date_parsed < dt_from:
-                continue
-            if date_to and dt_to and date_parsed and date_parsed > dt_to:
-                continue
+            if date_from and dt_from:
+                if not date_parsed:
+                    if keyword_lower or assignee_lower or types:
+                        pass
+                    else:
+                        continue
+                elif date_parsed < dt_from:
+                    continue
+            if date_to and dt_to:
+                if not date_parsed:
+                    pass
+                elif date_parsed > dt_to:
+                    continue
 
-            matches = self._search_in_minutes(
-                minutes, keyword_lower, assignee_lower, types
-            )
+            try:
+                matches = self._search_in_minutes(
+                    minutes, keyword_lower, assignee_lower, types
+                )
+            except Exception:
+                matches = []
+
             if matches:
                 results.append({
                     "project": project_name,
@@ -104,10 +134,14 @@ class Searcher:
     ) -> List[dict]:
         matches = []
         type_set = set(t.lower() for t in types) if types else None
+        meeting_label = minutes.title or minutes.source_file or ""
 
         all_text = "\n".join(s.content for s in minutes.segments)
 
-        for agenda in minutes.agendas:
+        for agenda_idx, agenda in enumerate(minutes.agendas, 1):
+            agenda_ref = f"议题#{agenda_idx} {agenda.title}"
+            agenda_source = agenda.meeting_source or meeting_label
+
             if self._should_include_type("议题", type_set):
                 if self._match_keyword(agenda.title, keyword):
                     ctx = self._get_context(all_text, agenda.title, 40)
@@ -115,6 +149,8 @@ class Searcher:
                         "type": "议题",
                         "content": agenda.title,
                         "context": ctx,
+                        "meeting": agenda_source,
+                        "agenda_ref": agenda_ref,
                     })
                 if self._match_keyword(agenda.content, keyword):
                     ctx = self._get_context(agenda.content, keyword, 60) if keyword else agenda.content[:80]
@@ -122,6 +158,8 @@ class Searcher:
                         "type": "议题内容",
                         "content": agenda.content[:100],
                         "context": ctx,
+                        "meeting": agenda_source,
+                        "agenda_ref": agenda_ref,
                     })
                 for ks in agenda.key_sentences:
                     if self._should_include_type("要点", type_set) and self._match_keyword(ks, keyword):
@@ -130,6 +168,8 @@ class Searcher:
                             "type": "要点",
                             "content": ks,
                             "context": ctx,
+                            "meeting": agenda_source,
+                            "agenda_ref": agenda_ref,
                         })
                 for r in agenda.risks:
                     if self._should_include_type("风险", type_set) and self._match_keyword(r, keyword):
@@ -138,31 +178,42 @@ class Searcher:
                             "type": "风险",
                             "content": r,
                             "context": ctx,
+                            "meeting": agenda_source,
+                            "agenda_ref": agenda_ref,
                         })
 
-        for todo in minutes.todos:
+        for todo_idx, todo in enumerate(minutes.todos, 1):
             if self._should_include_type("待办", type_set):
                 task_match = self._match_keyword(todo.task, keyword)
-                assignee_match = (not assignee) or (assignee in todo.assignee.lower())
+                todo_assignees = " ".join(todo.get_all_assignees()).lower()
+                assignee_match = (not assignee) or (assignee in todo_assignees)
                 if task_match or assignee_match:
                     ctx = self._get_context(all_text, todo.task, 40)
+                    todo_src = todo.get_all_sources() or [meeting_label]
                     matches.append({
                         "type": "待办",
                         "content": todo.task,
                         "context": ctx,
-                        "assignee": todo.assignee,
-                        "deadline": todo.deadline,
+                        "assignee": todo.display_assignees(),
+                        "deadline": todo.display_deadlines(),
+                        "meeting": " | ".join(todo_src),
+                        "agenda_ref": todo.agenda_source or "",
+                        "segment_ref": todo.segment_source or "",
+                        "todo_index": todo_idx,
                     })
 
         if self._should_include_type("发言", type_set):
-            for seg in minutes.segments:
+            for seg_idx, seg in enumerate(minutes.segments, 1):
                 if self._match_keyword(seg.content, keyword):
                     ctx = self._get_context(seg.content, keyword, 50) if keyword else seg.content[:80]
+                    seg_src = seg.meeting_source or meeting_label
                     matches.append({
                         "type": "发言",
                         "content": f"{seg.speaker}：{seg.content[:80]}",
                         "context": ctx,
                         "speaker": seg.speaker,
+                        "meeting": seg_src,
+                        "segment_index": seg_idx,
                     })
 
         if self._should_include_type("重点", type_set):
@@ -173,24 +224,34 @@ class Searcher:
                         "type": "重点",
                         "content": h,
                         "context": ctx,
+                        "meeting": meeting_label,
                     })
 
         if self._should_include_type("风险", type_set):
-            for r in minutes.risks:
+            for r_idx, r in enumerate(minutes.risks, 1):
                 if self._match_keyword(r, keyword):
-                    ctx = self._get_context(all_text, r, 40)
-                    matches.append({
-                        "type": "风险",
-                        "content": r,
-                        "context": ctx,
-                    })
+                    in_agenda = any(r in a.risks for a in minutes.agendas)
+                    if not in_agenda:
+                        ctx = self._get_context(all_text, r, 40)
+                        matches.append({
+                            "type": "风险",
+                            "content": r,
+                            "context": ctx,
+                            "meeting": meeting_label,
+                            "risk_index": r_idx,
+                        })
 
         return matches
 
     def _match_keyword(self, text: str, keyword: str) -> bool:
         if not keyword:
             return True
-        return keyword in text.lower()
+        if not text:
+            return False
+        try:
+            return keyword in text.lower()
+        except Exception:
+            return False
 
     def _should_include_type(self, ttype: str, type_set: Optional[set]) -> bool:
         if type_set is None:
@@ -200,7 +261,10 @@ class Searcher:
     def _get_context(self, full_text: str, match_text: str, window: int = 50) -> str:
         if not match_text:
             return ""
-        idx = full_text.find(match_text)
+        try:
+            idx = full_text.find(match_text)
+        except Exception:
+            idx = -1
         if idx < 0:
             return match_text[:window * 2]
         start = max(0, idx - window)
@@ -271,6 +335,17 @@ class Searcher:
                     lines.append(f"       [dim]→ {assignee} | {deadline}[/]")
                 if match.get("speaker"):
                     lines.append(f"       [dim]发言人：{match['speaker']}[/]")
+                src_info = []
+                if match.get("meeting"):
+                    src_info.append(f"会议: {match['meeting']}")
+                if match.get("agenda_ref"):
+                    src_info.append(match["agenda_ref"])
+                if match.get("segment_index"):
+                    src_info.append(f"发言#{match['segment_index']}")
+                if match.get("todo_index"):
+                    src_info.append(f"待办#{match['todo_index']}")
+                if src_info:
+                    lines.append(f"       [dim]🎯 {' | '.join(src_info)}[/]")
 
             total_matches += len(result["matches"])
 

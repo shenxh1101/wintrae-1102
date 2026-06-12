@@ -289,26 +289,26 @@ def todo(project: str, file: str):
             console.print("[yellow]未识别到待办事项[/]")
             return
 
-        has_source = any(t.meeting_source for t in todos)
+        has_source = any(t.get_all_sources() for t in todos)
+        has_multiple = any(len(t.get_all_assignees()) > 1 or len(t.get_all_deadlines()) > 1 for t in todos)
 
         table = Table(title="✅ 待办事项")
         table.add_column("#", style="dim", width=4)
         table.add_column("任务", width=35)
-        table.add_column("责任人", style="cyan", width=10)
-        table.add_column("截止时间", style="yellow", width=14)
+        table.add_column("责任人", style="cyan", width=14)
+        table.add_column("截止时间", style="yellow", width=16)
         table.add_column("优先级", style="red", width=8)
-        table.add_column("来源", style="dim", width=10)
         if has_source:
-            table.add_column("会议", style="magenta", width=18)
+            table.add_column("会议来源", style="magenta", width=20)
 
         for i, t in enumerate(todos, 1):
-            assignee = t.assignee or "[red]❌ 缺失[/]"
-            deadline = t.deadline or "[red]❌ 缺失[/]"
+            assignee = t.display_assignees() or "[red]❌ 缺失[/]"
+            deadline = t.display_deadlines() or "[red]❌ 缺失[/]"
             priority = t.priority or "-"
-            source = t.source or "-"
-            row_vals = [str(i), t.task[:50], assignee, deadline, priority, source]
+            row_vals = [str(i), t.task[:50], assignee, deadline, priority]
             if has_source:
-                row_vals.append(t.meeting_source or "-")
+                srcs = t.get_all_sources()
+                row_vals.append("、".join(srcs) if srcs else "-")
             table.add_row(*row_vals)
 
         console.print(table)
@@ -640,12 +640,15 @@ def merge_cmd(project: str, files: tuple, title: Optional[str], output: Optional
         ))
 
         if merged.todos and not no_source:
-            has_source = any(t.meeting_source for t in merged.todos)
+            has_source = any(t.get_all_sources() for t in merged.todos)
             if has_source:
                 console.print("\n[dim]待办事项来源分布：[/]")
                 for i, t in enumerate(merged.todos, 1):
-                    src = t.meeting_source or "-"
-                    console.print(f"  {i:>2}. {t.task[:40]} [dim]→ {src}[/]")
+                    srcs = "、".join(t.get_all_sources()) if t.get_all_sources() else "-"
+                    multi_note = ""
+                    if len(t.get_all_assignees()) > 1 or len(t.get_all_deadlines()) > 1:
+                        multi_note = " [yellow](多场会议合并)[/]"
+                    console.print(f"  {i:>2}. {t.task[:40]} [dim]→ {srcs}[/]{multi_note}")
 
         console.print(f"\n[green]已保存：{saved}[/]")
 
@@ -699,6 +702,125 @@ def list_cmd(project: Optional[str], verbose: bool):
                         console.print(f"  - {p}")
                 else:
                     console.print(f"  - {p}")
+
+
+@cli.command("timeline")
+@click.argument("project")
+@click.option("--asc", is_flag=True, help="按日期升序（默认倒序）")
+@click.option("--n", "-n", default=20, help="最多显示多少场会议（默认20）")
+@click.option("--show-todos", is_flag=True, help="显示每场会议的所有待办（默认只显示关键待办）")
+def timeline_cmd(project: str, asc: bool, n: int, show_todos: bool):
+    """项目会议时间线 - 显示议题、风险、待办完成情况和关键待办"""
+    try:
+        processed_files = pm.list_minutes(project)
+        if not processed_files:
+            console.print(f"[yellow]项目 '{project}' 暂无处理过的会议纪要[/]")
+            return
+
+        meetings = []
+        for pf in processed_files:
+            try:
+                minutes = pm.load_minutes(project, pf)
+                meetings.append((pf, minutes))
+            except Exception:
+                continue
+
+        if not meetings:
+            console.print(f"[yellow]没有成功加载的会议纪要[/]")
+            return
+
+        def sort_key(item):
+            _, m = item
+            try:
+                d = m.get_parsed_date()
+                return d or datetime.min
+            except Exception:
+                return datetime.min
+
+        meetings.sort(key=sort_key, reverse=not asc)
+        meetings = meetings[:n]
+
+        console.print("")
+        console.print(f"[bold]📅 项目时间线：[/][cyan]{project}[/]  共 {len(meetings)} 场会议")
+        console.print("=" * 70)
+
+        total_agendas = 0
+        total_risks = 0
+        total_todos = 0
+        total_completed = 0
+
+        for i, (pf, m) in enumerate(meetings, 1):
+            date_str = m.date or "日期未知"
+            title = m.title or pf
+            agendas = m.agendas
+            risks = m.risks
+            todos = m.todos
+
+            total_agendas += len(agendas)
+            total_risks += len(risks)
+            total_todos += len(todos)
+
+            agenda_titles = [a.title[:25] + ("..." if len(a.title) > 25 else "") for a in agendas]
+            if len(agenda_titles) > 3:
+                agenda_titles = agenda_titles[:3] + [f"...等{len(agendas)}项"]
+            agenda_str = "、".join(agenda_titles) if agenda_titles else "无"
+
+            risk_str = f"[red]{len(risks)} 风险[/]" if risks else "无风险"
+
+            missing_count = len(m.todos_with_missing())
+            if todos:
+                completed_estimate = max(0, len(todos) - missing_count)
+                total_completed += completed_estimate
+                todo_stat = f"[green]{completed_estimate}有信息[/]/[red]{missing_count}缺失[/]"
+            else:
+                todo_stat = "无待办"
+
+            marker = "├─" if i < len(meetings) else "└─"
+            console.print("")
+            console.print(f"[{i:>2}/{len(meetings)}] {marker} [bold cyan]{date_str}[/] | [bold]{title}[/]")
+            console.print(f"       [dim]文件：{pf}[/]")
+            console.print(f"     📌 议题：{agenda_str}")
+            console.print(f"     ⚠️  风险：{risk_str}")
+            console.print(f"     ✅ 待办：共 {len(todos)} 项 | {todo_stat}")
+
+            if todos:
+                if show_todos:
+                    for ti, t in enumerate(todos, 1):
+                        a = t.display_assignees() or "❌"
+                        d = t.display_deadlines() or "❌"
+                        console.print(f"        {ti:>2}. {t.task[:50]} [dim]({a} | {d})[/]")
+                else:
+                    high_prio = [t for t in todos if t.priority and ("高" in t.priority or t.priority in ("紧急", "1"))]
+                    critical = [t for t in todos if not t.display_assignees() or not t.display_deadlines()]
+                    key_todos = []
+                    for t in high_prio[:3]:
+                        key_todos.append(t)
+                    for t in critical[:3]:
+                        if t not in key_todos:
+                            key_todos.append(t)
+                    if not key_todos and todos:
+                        key_todos = todos[:3]
+                    if key_todos:
+                        console.print(f"     🔑 关键待办：")
+                        for ti, t in enumerate(key_todos, 1):
+                            a = t.display_assignees() or "[red]未指派[/]"
+                            d = t.display_deadlines() or "[red]无截止[/]"
+                            marker = "‼️" if not t.display_assignees() or not t.display_deadlines() else "•"
+                            console.print(f"        {marker} {t.task[:50]} [dim]({a} | {d})[/]")
+
+        console.print("")
+        console.print("=" * 70)
+        console.print(f"📊 统计：累计 {len(meetings)} 场会议 | {total_agendas} 议题 | {total_risks} 风险 | {total_todos} 待办")
+        if total_todos:
+            ratio = total_completed / total_todos * 100
+            bar_len = 30
+            filled = int(ratio / 100 * bar_len)
+            bar = "█" * filled + "░" * (bar_len - filled)
+            console.print(f"     待办完整度：[{bar}] {ratio:.0f}% ({total_completed}/{total_todos} 有责任人/截止)")
+
+    except FileNotFoundError as e:
+        console.print(f"[bold red]{e}[/]")
+        sys.exit(1)
 
 
 def main():

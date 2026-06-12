@@ -12,6 +12,7 @@ class SpeakerSegment:
     speaker: str = ""
     content: str = ""
     timestamp: str = ""
+    meeting_source: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -27,6 +28,7 @@ class AgendaItem:
     content: str = ""
     key_sentences: List[str] = field(default_factory=list)
     risks: List[str] = field(default_factory=list)
+    meeting_source: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -44,6 +46,11 @@ class TodoItem:
     source: str = ""
     priority: str = ""
     meeting_source: str = ""
+    assignees: List[str] = field(default_factory=list)
+    deadlines: List[str] = field(default_factory=list)
+    meeting_sources: List[str] = field(default_factory=list)
+    agenda_source: str = ""
+    segment_source: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -55,11 +62,33 @@ class TodoItem:
     @property
     def missing_fields(self) -> List[str]:
         missing = []
-        if not self.assignee:
+        effective_assignee = self.assignee or (self.assignees[0] if self.assignees else "")
+        effective_deadline = self.deadline or (self.deadlines[0] if self.deadlines else "")
+        if not effective_assignee:
             missing.append("责任人")
-        if not self.deadline:
+        if not effective_deadline:
             missing.append("截止时间")
         return missing
+
+    def get_all_assignees(self) -> List[str]:
+        result = list(dict.fromkeys([a for a in (self.assignee, *self.assignees) if a]))
+        return result
+
+    def get_all_deadlines(self) -> List[str]:
+        result = list(dict.fromkeys([d for d in (self.deadline, *self.deadlines) if d]))
+        return result
+
+    def get_all_sources(self) -> List[str]:
+        result = list(dict.fromkeys([s for s in (self.meeting_source, *self.meeting_sources) if s]))
+        return result
+
+    def display_assignees(self) -> str:
+        all_a = self.get_all_assignees()
+        return "、".join(all_a) if all_a else ""
+
+    def display_deadlines(self) -> str:
+        all_d = self.get_all_deadlines()
+        return "、".join(all_d) if all_d else ""
 
     def task_key(self) -> str:
         STOPWORDS = {"的", "了", "是", "我", "你", "他", "她", "它", "们", "这个", "那个", "这", "那", "就", "都", "就", "要", "去", "做", "搞", "弄", "好", "完", "成", "完成", "做好", "搞定", "一下", "把", "给", "让", "请", "请把", "工作", "任务", "一下", "把", "给", "让", "请", "需要", "必须", "应该", "要", "需", "须"}
