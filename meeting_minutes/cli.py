@@ -11,7 +11,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
-from .models import MeetingMinutes
+from .models import MeetingMinutes, TODO_STATUS
 from .project import ProjectManager
 from .cleaner import clean_text, clean_segments
 from .splitter import split_by_speakers, merge_short_segments
@@ -20,7 +20,8 @@ from .todo_extractor import extract_todos
 from .exporter import export_minutes
 from .checker import Checker
 from .searcher import Searcher
-from .merger import Merger
+from .merger import Merger, MergeChangeSummary
+from .review_exporter import ReviewExporter
 
 console = Console()
 pm = ProjectManager()
@@ -274,14 +275,51 @@ def summary(project: str, file: str, highlight: bool, risk: bool):
 @cli.command()
 @click.argument("project")
 @click.option("--file", "-f", required=True, help="指定已处理的纪要文件")
-def todo(project: str, file: str):
+@click.option("--status", "set_status", nargs=2, help="设置某条待办的状态：编号 状态（待办/进行中/已完成/延期/取消)")
+@click.option("--set-assignee", "set_assignee", nargs=2, help="设置某条待办的责任人：编号 姓名")
+@click.option("--set-deadline", "set_deadline", nargs=2, help="设置某条待办的截止时间：编号 时间")
+@click.option("--with-history", is_flag=True, help="加载项目历史纪要，自动关联历史状态和负责人")
+def todo(project: str, file: str, set_status, set_assignee, set_deadline, with_history: bool):
     """提取待办事项、责任人和截止时间"""
     try:
         minutes = pm.load_minutes(project, file)
 
         text = minutes.cleaned_text or minutes.raw_text
-        todos = extract_todos(minutes.segments, text)
+
+        project_history = None
+        if with_history:
+            processed_files = pm.list_minutes(project)
+            if processed_files:
+                project_history = []
+                for pf in processed_files:
+                    if pf == file:
+                        continue
+                    try:
+                        m = pm.load_minutes(project, pf)
+                        project_history.append(m)
+                    except Exception:
+                        continue
+
+        todos = extract_todos(minutes.segments, text, project_history=project_history, current_meeting_title=minutes.title or file)
         minutes.todos = todos
+
+        if set_status:
+            idx = int(set_status[0])
+            status_val = set_status[1]
+            if minutes.update_todo(idx, status=status_val):
+                console.print(f"[green]✅ 已更新 #{idx} 状态为：{status_val}[/]")
+
+        if set_assignee:
+            idx = int(set_assignee[0])
+            val = set_assignee[1]
+            if minutes.update_todo(idx, assignee=val):
+                console.print(f"[green]✅ 已更新 #{idx} 责任人为：{val}[/]")
+
+        if set_deadline:
+            idx = int(set_deadline[0])
+            val = set_deadline[1]
+            if minutes.update_todo(idx, deadline=val):
+                console.print(f"[green]✅ 已更新 #{idx} 截止时间为：{val}[/]")
 
         pm.save_minutes(project, minutes, file)
 
@@ -291,10 +329,14 @@ def todo(project: str, file: str):
 
         has_source = any(t.get_all_sources() for t in todos)
         has_multiple = any(len(t.get_all_assignees()) > 1 or len(t.get_all_deadlines()) > 1 for t in todos)
+        has_status = any(t.status and t.status != "待办" for t in todos)
+
+        status_map = {"待办": "⏳", "进行中": "🔄", "已完成": "✅", "延期": "⚠️", "取消": "❌"}
 
         table = Table(title="✅ 待办事项")
         table.add_column("#", style="dim", width=4)
-        table.add_column("任务", width=35)
+        table.add_column("状态", width=2)
+        table.add_column("任务", width=30)
         table.add_column("责任人", style="cyan", width=14)
         table.add_column("截止时间", style="yellow", width=16)
         table.add_column("优先级", style="red", width=8)
@@ -302,10 +344,11 @@ def todo(project: str, file: str):
             table.add_column("会议来源", style="magenta", width=20)
 
         for i, t in enumerate(todos, 1):
+            status_icon = status_map.get(t.status, "")
             assignee = t.display_assignees() or "[red]❌ 缺失[/]"
             deadline = t.display_deadlines() or "[red]❌ 缺失[/]"
             priority = t.priority or "-"
-            row_vals = [str(i), t.task[:50], assignee, deadline, priority]
+            row_vals = [str(i), status_icon, t.task[:50], assignee, deadline, priority]
             if has_source:
                 srcs = t.get_all_sources()
                 row_vals.append("、".join(srcs) if srcs else "-")
@@ -318,6 +361,16 @@ def todo(project: str, file: str):
         if issues:
             console.print(f"\n[yellow]⚠️ {len(issues)} 项待办缺少责任人或截止时间[/]")
             console.print(f"[dim]使用 mm review {project} -f {file} 可快速补全信息[/]")
+
+        has_status_changes = [t for t in todos if t.history]
+        if has_status_changes:
+            console.print(f"\n[cyan]📜 状态历史：[/]")
+            for t in todos:
+                if t.history:
+                    console.print(f"  - {t.task[:40]}")
+                    for h in t.history[-3:]:
+                        status_icon = status_map.get(h.status, "")
+                        console.print(f"      {status_icon} {h.date} | {h.status} | {h.assignee} | {h.deadline} | {h.meeting}")
 
         console.print(f"\n[green]已更新：{file}[/]")
 
@@ -377,6 +430,7 @@ def review(project: str, file: str):
             console.print("  [cyan]2[/]. 按编号编辑待办截止时间")
             console.print("  [cyan]3[/]. 同时编辑责任人 + 截止时间")
             console.print("  [cyan]4[/]. 批量补全所有缺失的待办")
+            console.print("  [cyan]5[/]. 设置待办状态（待办/进行中/已完成/延期/取消）")
             console.print("  [cyan]s[/]. 保存并退出")
             console.print("  [cyan]q[/]. 不保存退出")
 
@@ -432,6 +486,18 @@ def review(project: str, file: str):
                             minutes.update_todo(idx, deadline=deadline)
                             changed = True
                 console.print("\n[green]✅ 批量补全完成[/]")
+
+            elif choice == "5":
+                idx = click.prompt("请输入待办编号", type=int)
+                if idx < 1 or idx > len(minutes.todos):
+                    console.print("[bold red]编号超出范围[/]")
+                    continue
+                console.print("  可选状态：待办、进行中、已完成、延期、取消")
+                status = click.prompt(f"  请输入状态", type=str).strip()
+                note = click.prompt(f"  备注（可选）", default="", show_default=False).strip()
+                if minutes.update_todo(idx, status=status):
+                    changed = True
+                    console.print(f"[green]✅ 已更新 #{idx} 状态为：{status}[/]")
 
             elif choice == "s":
                 if changed:
@@ -523,8 +589,10 @@ def export(project: str, file: Optional[str], fmt: str, output: Optional[str], n
 @click.option("--type", "types", multiple=True, help="按类型过滤：议题/要点/风险/待办/发言/重点（可多次使用）")
 @click.option("--todo-only", is_flag=True, help="只搜索待办事项")
 @click.option("--risk-only", is_flag=True, help="只搜索风险项")
+@click.option("--export", "-e", is_flag=True, help="导出搜索结果为 Markdown")
+@click.option("--output", "-o", default=None, help="导出文件名（仅当使用 --export 时有效）")
 def search_cmd(keyword: str, project: Optional[str], date_from: Optional[str], date_to: Optional[str],
-               assignee: Optional[str], types: tuple, todo_only: bool, risk_only: bool):
+               assignee: Optional[str], types: tuple, todo_only: bool, risk_only: bool, export: bool, output: Optional[str]):
     """按关键词检索历史纪要（支持多条件过滤）"""
     searcher = Searcher(pm)
 
@@ -586,22 +654,107 @@ def search_cmd(keyword: str, project: Optional[str], date_from: Optional[str], d
                 "待办": "yellow", "发言": "magenta", "重点": "cyan",
                 "议题内容": "blue",
             }
+            status_map = {
+                "待办": "⏳", "进行中": "🔄", "已完成": "✅", "延期": "⚠️", "取消": "❌"
+            }
             color = type_colors.get(match["type"], "white")
-            console.print(f"   [{color}]{i:>2}. [{match['type']}][/{color}] {match['content'][:80]}")
+            status_icon = status_map.get(match.get("status", ""), "")
+            status_str = f" {status_icon}" if status_icon else ""
+            console.print(f"   [{color}]{i:>2}. [{match['type']}][/{color}]{status_str} {match['content'][:80]}")
             if match.get("context"):
                 ctx = match["context"].replace("\n", " ")
                 console.print(f"       [dim]上下文：{ctx[:120]}[/]")
             if match.get("assignee"):
                 assignee = match["assignee"] or "❌ 未指定"
                 deadline = match.get("deadline", "") or "❌ 未指定"
-                console.print(f"       [dim]→ {assignee} | {deadline}[/]")
+                status_val = match.get("status", "") or ""
+                line_parts = [assignee, deadline]
+                if status_val:
+                    line_parts.append(status_val)
+                console.print(f"       [dim]→ {' | '.join(line_parts)}[/]")
             if match.get("speaker"):
                 console.print(f"       [dim]发言人：{match['speaker']}[/]")
+            src_info = []
+            if match.get("meeting"):
+                src_info.append(f"会议: {match['meeting']}")
+            if match.get("agenda_ref"):
+                src_info.append(match["agenda_ref"])
+            if match.get("segment_index"):
+                src_info.append(f"发言#{match['segment_index']}")
+            if match.get("todo_index"):
+                src_info.append(f"待办#{match['todo_index']}")
+            if src_info:
+                console.print(f"       [dim]🎯 {' | '.join(src_info)}[/]")
 
         total_matches += len(result["matches"])
 
     console.print("")
     console.print(f"共 {len(results)} 个纪要、{total_matches} 条匹配")
+
+    if export:
+        md_lines = []
+        md_lines.append(f"# 搜索结果：{keyword}")
+        md_lines.append("")
+        if filter_desc:
+            md_lines.append(f"**过滤条件**：{', '.join(filter_desc)}")
+            md_lines.append("")
+        md_lines.append(f"**总计**：{len(results)} 个纪要、{total_matches} 条匹配")
+        md_lines.append("")
+        md_lines.append("---")
+        md_lines.append("")
+
+        status_map = {"待办": "⏳", "进行中": "🔄", "已完成": "✅", "延期": "⚠️", "取消": "❌"}
+        for result in results:
+            md_lines.append(f"## 📄 {result['title'] or '未命名'}")
+            md_lines.append("")
+            md_lines.append(f"- **日期**：{result['date'] or '-'}")
+            md_lines.append(f"- **项目**：{result['project']}")
+            md_lines.append(f"- **文件**：{result['file']}")
+            if result["speakers"]:
+                md_lines.append(f"- **参会**：{', '.join(result['speakers'])}")
+            md_lines.append("")
+            md_lines.append("### 匹配结果")
+            md_lines.append("")
+            for i, match in enumerate(result["matches"], 1):
+                status_icon = status_map.get(match.get("status", ""), "") if match["type"] == "待办" else ""
+                status_str = f" {status_icon}" if status_icon else ""
+                md_lines.append(f"{i}. **[{match['type']}]**{status_str} {match['content']}")
+                if match.get("context"):
+                    md_lines.append(f"    > 上下文：{match['context']}")
+                if match.get("assignee"):
+                    assignee = match["assignee"] or "-"
+                    deadline = match.get("deadline", "") or "-"
+                    status_val = match.get("status", "") or ""
+                    line_parts = [f"责任人: {assignee}", f"截止: {deadline}"]
+                    if status_val:
+                        line_parts.append(f"状态: {status_val}")
+                    md_lines.append(f"    > {' | '.join(line_parts)}")
+                if match.get("speaker"):
+                    md_lines.append(f"    > 发言人：{match['speaker']}")
+                src_info = []
+                if match.get("meeting"):
+                    src_info.append(f"会议: {match['meeting']}")
+                if match.get("agenda_ref"):
+                    src_info.append(match["agenda_ref"])
+                if match.get("segment_index"):
+                    src_info.append(f"发言#{match['segment_index']}")
+                if match.get("todo_index"):
+                    src_info.append(f"待办#{match['todo_index']}")
+                if src_info:
+                    md_lines.append(f"    > 🎯 {' | '.join(src_info)}")
+            md_lines.append("")
+
+        md_lines.append("---")
+        md_lines.append(f"*由 meeting-minutes 工具自动生成*")
+
+        if output:
+            out_path = Path(output)
+        else:
+            safe_keyword = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', keyword[:30])
+            out_path = Path.cwd() / f"search_{safe_keyword}.md"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("\n".join(md_lines), encoding="utf-8")
+        console.print(f"\n[green]✅ 已导出到：{out_path}[/]")
 
 
 @cli.command("merge")
@@ -617,7 +770,7 @@ def merge_cmd(project: str, files: tuple, title: Optional[str], output: Optional
     """合并多场会议纪要（按时间排序，智能合并待办）"""
     try:
         merger = Merger(pm)
-        merged = merger.merge_minutes(
+        merged, summary = merger.merge_minutes_with_summary(
             project_name=project,
             filenames=list(files),
             title=title,
@@ -638,6 +791,52 @@ def merge_cmd(project: str, files: tuple, title: Optional[str], output: Optional
             f"来源标记：{'是' if not no_source else '否'}",
             title="🔗 合并完成",
         ))
+
+        if summary.has_changes():
+            console.print("\n[bold cyan]📋 合并变更摘要：[/]")
+            console.print("=" * 60)
+
+            if summary.merged_todos:
+                console.print(f"\n[yellow]🔀 跨会议合并的待办 ({len(summary.merged_todos)} 项)：[/]")
+                for task, sources, first_seen in summary.merged_todos:
+                    src_str = "、".join(sources) if sources else "-"
+                    first = f"（首次出现：{first_seen[0]} @ {first_seen[1]}）" if first_seen[0] else ""
+                    console.print(f"  - {task[:60]}")
+                    console.print(f"       来源：[dim]{src_str}[/] {first}")
+
+            if summary.assignee_changes:
+                console.print(f"\n[cyan]👤 负责人变化 ({len(summary.assignee_changes)} 项)：[/]")
+                for task, new_as, prev_as, meeting in summary.assignee_changes:
+                    prev = "、".join(sorted(prev_as)) if prev_as else "无"
+                    new = "、".join(sorted(new_as)) if new_as else "无"
+                    console.print(f"  - {task[:60]}")
+                    console.print(f"       [dim]{prev}[/] → [green]{new}[/]  @ {meeting}")
+
+            if summary.deadline_changes:
+                console.print(f"\n[magenta]📅 截止时间变化 ({len(summary.deadline_changes)} 项)：[/]")
+                for task, new_ds, prev_ds, meeting in summary.deadline_changes:
+                    prev = "、".join(sorted(prev_ds)) if prev_ds else "无"
+                    new = "、".join(sorted(new_ds)) if new_ds else "无"
+                    console.print(f"  - {task[:60]}")
+                    console.print(f"       [dim]{prev}[/] → [green]{new}[/]  @ {meeting}")
+
+            if summary.status_changes:
+                console.print(f"\n[green]🔄 状态变化 ({len(summary.status_changes)} 项)：[/]")
+                for task, new_status, prev_status, meeting in summary.status_changes:
+                    console.print(f"  - {task[:60]}")
+                    console.print(f"       [dim]{prev_status}[/] → [green]{new_status}[/]  @ {meeting}")
+
+            if summary.duplicate_risks:
+                console.print(f"\n[red]⚠️ 重复出现的风险 ({len(summary.duplicate_risks)} 项)：[/]")
+                for risk, sources in summary.duplicate_risks:
+                    src_str = "、".join(sources) if sources else "-"
+                    console.print(f"  - {risk[:60]}")
+                    console.print(f"       出现于：[red]{src_str}[/]")
+
+            if summary.new_todos:
+                console.print(f"\n[green]✨ 新增待办 ({len(summary.new_todos)} 项)：[/]")
+                for task in summary.new_todos:
+                    console.print(f"  - {task[:60]}")
 
         if merged.todos and not no_source:
             has_source = any(t.get_all_sources() for t in merged.todos)
@@ -706,15 +905,66 @@ def list_cmd(project: Optional[str], verbose: bool):
 
 @cli.command("timeline")
 @click.argument("project")
+@click.option("--granularity", "--gran", default="meeting", type=click.Choice(["meeting", "week", "month"]), help="时间线粒度：meeting(按会议)、week(按周)、month(按月)")
 @click.option("--asc", is_flag=True, help="按日期升序（默认倒序）")
-@click.option("--n", "-n", default=20, help="最多显示多少场会议（默认20）")
-@click.option("--show-todos", is_flag=True, help="显示每场会议的所有待办（默认只显示关键待办）")
-def timeline_cmd(project: str, asc: bool, n: int, show_todos: bool):
-    """项目会议时间线 - 显示议题、风险、待办完成情况和关键待办"""
+@click.option("--n", "-n", default=20, help="最多显示多少条（默认20）")
+@click.option("--show-todos", is_flag=True, help="显示所有待办（默认只显示关键待办）")
+@click.option("--export", "-e", default=None, help="导出 Markdown 复盘报告到指定文件")
+@click.option("--date-from", default=None, help="起始日期（YYYY-MM-DD）")
+@click.option("--date-to", default=None, help="结束日期（YYYY-MM-DD）")
+def timeline_cmd(project: str, granularity: str, asc: bool, n: int, show_todos: bool, export: Optional[str], date_from: Optional[str], date_to: Optional[str]):
+    """项目会议时间线 - 按会议/周/月显示议题、风险、待办完成情况"""
     try:
         processed_files = pm.list_minutes(project)
         if not processed_files:
             console.print(f"[yellow]项目 '{project}' 暂无处理过的会议纪要[/]")
+            return
+
+        if granularity in ("week", "month"):
+            re = ReviewExporter(pm)
+            stats_list = re.generate_review(
+                project_name=project,
+                gran=granularity,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            if not asc:
+                stats_list = list(reversed(stats_list))
+            stats_list = stats_list[:n]
+
+            if not stats_list:
+                console.print(f"[yellow]没有找到符合条件的周期数据[/]")
+                return
+
+            console.print("")
+            console.print(f"[bold]📅 项目时间线：[/][cyan]{project}[/]  [dim]按{granularity}[/]  共 {len(stats_list)} 个周期")
+            console.print("=" * 70)
+
+            console.print(re.print_timeline_text(stats_list, show_todos=show_todos))
+
+            total_meetings = sum(s.meeting_count for s in stats_list)
+            total_new_todos = sum(len(s.new_todos) for s in stats_list)
+            total_closed = sum(len(s.closed_todos) for s in stats_list)
+            total_risks = sum(len(s.new_risks) for s in stats_list)
+
+            console.print("=" * 70)
+            console.print(f"📊 统计：累计 {len(stats_list)} 周期 | {total_meetings} 会议 | {total_new_todos} 待办新增 | {total_closed} 待办完成 | {total_risks} 风险新增")
+            if total_new_todos > 0:
+                rate = total_closed / total_new_todos * 100
+                bar_len = 30
+                filled = int(rate / 100 * bar_len)
+                bar = "█" * filled + "░" * (bar_len - filled)
+                console.print(f"     完成率：[{bar}] {rate:.0f}% ({total_closed}/{total_new_todos})")
+
+            if export:
+                project_dir = pm.get_project_dir(project)
+                if project_dir:
+                    export_path = project_dir / "exports" / export
+                    if not export_path.suffix:
+                        export_path = export_path.with_suffix(".md")
+                    re.export_markdown(project, stats_list, output_path=str(export_path))
+                    console.print(f"\n[green]✅ 复盘报告已导出：{export_path}[/]")
+
             return
 
         meetings = []
@@ -749,6 +999,8 @@ def timeline_cmd(project: str, asc: bool, n: int, show_todos: bool):
         total_todos = 0
         total_completed = 0
 
+        status_map = {"待办": "⏳", "进行中": "🔄", "已完成": "✅", "延期": "⚠️", "取消": "❌"}
+
         for i, (pf, m) in enumerate(meetings, 1):
             date_str = m.date or "日期未知"
             title = m.title or pf
@@ -767,13 +1019,13 @@ def timeline_cmd(project: str, asc: bool, n: int, show_todos: bool):
 
             risk_str = f"[red]{len(risks)} 风险[/]" if risks else "无风险"
 
-            missing_count = len(m.todos_with_missing())
-            if todos:
-                completed_estimate = max(0, len(todos) - missing_count)
-                total_completed += completed_estimate
-                todo_stat = f"[green]{completed_estimate}有信息[/]/[red]{missing_count}缺失[/]"
-            else:
-                todo_stat = "无待办"
+            done = len([t for t in todos if t.status == "已完成"])
+            inprog = len([t for t in todos if t.status == "进行中"])
+            delay = len([t for t in todos if t.status == "延期"])
+            missing = len(m.todos_with_missing())
+            todo_stat = f"[green]{done}已完[/]/[cyan]{inprog}进行[/]/[yellow]{delay}延期[/]/[red]{missing}缺失[/]"
+
+            total_completed += done
 
             marker = "├─" if i < len(meetings) else "└─"
             console.print("")
@@ -788,13 +1040,18 @@ def timeline_cmd(project: str, asc: bool, n: int, show_todos: bool):
                     for ti, t in enumerate(todos, 1):
                         a = t.display_assignees() or "❌"
                         d = t.display_deadlines() or "❌"
-                        console.print(f"        {ti:>2}. {t.task[:50]} [dim]({a} | {d})[/]")
+                        status_icon = status_map.get(t.status, "")
+                        console.print(f"        {ti:>2}. {status_icon} {t.task[:50]} [dim]({a} | {d})[/]")
                 else:
                     high_prio = [t for t in todos if t.priority and ("高" in t.priority or t.priority in ("紧急", "1"))]
-                    critical = [t for t in todos if not t.display_assignees() or not t.display_deadlines()]
+                    critical = [t for t in todos if not t.display_assignees() or not t.display_deadlines() or t.status == "延期"]
+                    done_todos = [t for t in todos if t.status == "已完成"]
                     key_todos = []
-                    for t in high_prio[:3]:
+                    for t in done_todos[:2]:
                         key_todos.append(t)
+                    for t in high_prio[:3]:
+                        if t not in key_todos:
+                            key_todos.append(t)
                     for t in critical[:3]:
                         if t not in key_todos:
                             key_todos.append(t)
@@ -805,8 +1062,9 @@ def timeline_cmd(project: str, asc: bool, n: int, show_todos: bool):
                         for ti, t in enumerate(key_todos, 1):
                             a = t.display_assignees() or "[red]未指派[/]"
                             d = t.display_deadlines() or "[red]无截止[/]"
+                            status_icon = status_map.get(t.status, "")
                             marker = "‼️" if not t.display_assignees() or not t.display_deadlines() else "•"
-                            console.print(f"        {marker} {t.task[:50]} [dim]({a} | {d})[/]")
+                            console.print(f"        {marker} {status_icon} {t.task[:50]} [dim]({a} | {d})[/]")
 
         console.print("")
         console.print("=" * 70)
@@ -816,7 +1074,24 @@ def timeline_cmd(project: str, asc: bool, n: int, show_todos: bool):
             bar_len = 30
             filled = int(ratio / 100 * bar_len)
             bar = "█" * filled + "░" * (bar_len - filled)
-            console.print(f"     待办完整度：[{bar}] {ratio:.0f}% ({total_completed}/{total_todos} 有责任人/截止)")
+            console.print(f"     完成率：[{bar}] {ratio:.0f}% ({total_completed}/{total_todos} 已完成)")
+
+        if export and granularity == "meeting":
+            re = ReviewExporter(pm)
+            stats_list = re.generate_review(
+                project_name=project,
+                gran="week",
+                date_from=date_from,
+                date_to=date_to,
+            )
+            if stats_list:
+                project_dir = pm.get_project_dir(project)
+                if project_dir:
+                    export_path = project_dir / "exports" / export
+                    if not export_path.suffix:
+                        export_path = export_path.with_suffix(".md")
+                    re.export_markdown(project, stats_list, output_path=str(export_path))
+                    console.print(f"\n[green]✅ 复盘报告已导出：{export_path}[/]")
 
     except FileNotFoundError as e:
         console.print(f"[bold red]{e}[/]")

@@ -70,20 +70,23 @@ def export_markdown(minutes: MeetingMinutes) -> str:
         lines.append("")
         has_meeting_source = any(t.get_all_sources() for t in minutes.todos)
         has_multiple = any(len(t.get_all_assignees()) > 1 or len(t.get_all_deadlines()) > 1 for t in minutes.todos)
+        has_status = any(t.status and t.status != "待办" for t in minutes.todos)
+        has_history = any(t.history for t in minutes.todos)
 
-        header_parts = ["#", "任务", "责任人", "截止时间", "优先级"]
-        if has_multiple:
-            header_parts = ["#", "任务", "责任人", "截止时间", "优先级"]
+        status_map = {"待办": "⏳", "进行中": "🔄", "已完成": "✅", "延期": "⚠️", "取消": "❌"}
+
+        header_parts = ["#", "状态", "任务", "责任人", "截止时间", "优先级"]
         if has_meeting_source:
             header_parts.append("会议来源")
 
         lines.append("| " + " | ".join(header_parts) + " |")
         lines.append("|" + "|".join(["---"] * len(header_parts)) + "|")
         for i, todo in enumerate(minutes.todos, 1):
+            status_icon = status_map.get(todo.status, "")
             assignee = todo.display_assignees() or "❌ 未指定"
             deadline = todo.display_deadlines() or "❌ 未指定"
             priority = todo.priority or "-"
-            row = [str(i), todo.task[:60].replace("|", "｜"), assignee, deadline, priority]
+            row = [str(i), status_icon, todo.task[:60].replace("|", "｜"), assignee, deadline, priority]
             if has_meeting_source:
                 srcs = todo.get_all_sources()
                 row.append("、".join(srcs) if srcs else "-")
@@ -105,6 +108,26 @@ def export_markdown(minutes: MeetingMinutes) -> str:
             lines.append("**关联信息**：")
             for note in extra_notes:
                 lines.append(note)
+
+        if has_history:
+            lines.append("")
+            lines.append("**状态历史**：")
+            for i, todo in enumerate(minutes.todos, 1):
+                if todo.history:
+                    lines.append(f"- 待办#{i}：{todo.task[:60]}")
+                    for h in todo.history:
+                        status_icon = status_map.get(h.status, "")
+                        date_str = h.date or ""
+                        meeting_str = f" @ {h.meeting}" if h.meeting else ""
+                        details = []
+                        if h.assignee:
+                            details.append(f"负责人: {h.assignee}")
+                        if h.deadline:
+                            details.append(f"截止: {h.deadline}")
+                        if h.note:
+                            details.append(h.note)
+                        details_str = f" ({', '.join(details)})" if details else ""
+                        lines.append(f"    {status_icon} {date_str} | {h.status}{meeting_str}{details_str}")
         lines.append("")
 
     if minutes.segments:
@@ -181,11 +204,13 @@ def export_word(minutes: MeetingMinutes, output_path: Path) -> Path:
     if minutes.todos:
         doc.add_heading("待办事项", level=1)
         has_meeting_source = any(t.get_all_sources() for t in minutes.todos)
-        cols = 6 if has_meeting_source else 5
+        has_history = any(t.history for t in minutes.todos)
+        status_map = {"待办": "⏳", "进行中": "🔄", "已完成": "✅", "延期": "⚠️", "取消": "❌"}
+        cols = 7 if has_meeting_source else 6
         table = doc.add_table(rows=1, cols=cols)
         table.style = "Table Grid"
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        headers = ["#", "任务", "责任人", "截止时间", "优先级"]
+        headers = ["#", "状态", "任务", "责任人", "截止时间", "优先级"]
         if has_meeting_source:
             headers.append("会议来源")
         for i, header in enumerate(headers):
@@ -198,13 +223,14 @@ def export_word(minutes: MeetingMinutes, output_path: Path) -> Path:
         for idx, todo in enumerate(minutes.todos, 1):
             row = table.add_row()
             row.cells[0].text = str(idx)
-            row.cells[1].text = todo.task[:60]
-            row.cells[2].text = todo.display_assignees() or "❌ 未指定"
-            row.cells[3].text = todo.display_deadlines() or "❌ 未指定"
-            row.cells[4].text = todo.priority or "-"
+            row.cells[1].text = status_map.get(todo.status, "")
+            row.cells[2].text = todo.task[:60]
+            row.cells[3].text = todo.display_assignees() or "❌ 未指定"
+            row.cells[4].text = todo.display_deadlines() or "❌ 未指定"
+            row.cells[5].text = todo.priority or "-"
             if has_meeting_source:
                 srcs = todo.get_all_sources()
-                row.cells[5].text = "、".join(srcs) if srcs else "-"
+                row.cells[6].text = "、".join(srcs) if srcs else "-"
             missing = not todo.display_assignees() or not todo.display_deadlines()
             if missing:
                 for cell in row.cells:
@@ -227,6 +253,27 @@ def export_word(minutes: MeetingMinutes, output_path: Path) -> Path:
             run.bold = True
             for note in extra_notes:
                 doc.add_paragraph(note, style="List Bullet")
+
+        if has_history:
+            p = doc.add_paragraph()
+            run = p.add_run("状态历史：")
+            run.bold = True
+            for i, todo in enumerate(minutes.todos, 1):
+                if todo.history:
+                    doc.add_paragraph(f"待办#{i}：{todo.task[:60]}")
+                    for h in todo.history:
+                        status_icon = status_map.get(h.status, "")
+                        date_str = h.date or ""
+                        meeting_str = f" @ {h.meeting}" if h.meeting else ""
+                        details = []
+                        if h.assignee:
+                            details.append(f"负责人: {h.assignee}")
+                        if h.deadline:
+                            details.append(f"截止: {h.deadline}")
+                        if h.note:
+                            details.append(h.note)
+                        details_str = f" ({', '.join(details)})" if details else ""
+                        doc.add_paragraph(f"    {status_icon} {date_str} | {h.status}{meeting_str}{details_str}")
 
     if minutes.segments:
         doc.add_heading("发言记录", level=1)

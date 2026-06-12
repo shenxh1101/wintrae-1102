@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import List, Optional
 
-from .models import SpeakerSegment, TodoItem
+from .models import SpeakerSegment, TodoItem, MeetingMinutes
 
 SPEAKER_PREFIX_RE = re.compile(r"^([\u4e00-\u9fff]{2,4}|[A-Za-z]+(?:\s[A-Za-z]+)*)\s*[：:]\s*")
 
@@ -45,7 +45,7 @@ EXCLUDE_PATTERNS = [
 ]
 
 
-def extract_todos(segments: List[SpeakerSegment], raw_text: str = "") -> List[TodoItem]:
+def extract_todos(segments: List[SpeakerSegment], raw_text: str = "", project_history: List[MeetingMinutes] = None, current_meeting_title: str = "") -> List[TodoItem]:
     todos = []
     seen_keys = set()
 
@@ -74,15 +74,61 @@ def extract_todos(segments: List[SpeakerSegment], raw_text: str = "") -> List[To
                 continue
             seen_keys.add(dedup_key)
 
-            todos.append(TodoItem(
+            todo = TodoItem(
                 task=clean_task,
                 assignee=assignee,
                 deadline=deadline,
                 source=speaker,
                 priority=priority,
-            ))
+            )
+
+            if project_history:
+                _apply_history_to_todo(todo, project_history, current_meeting_title)
+
+            todos.append(todo)
 
     return todos
+
+
+def _apply_history_to_todo(todo: TodoItem, project_history: List[MeetingMinutes], current_meeting_title: str = ""):
+    key = todo.task_key()
+    for pm in project_history:
+        for pt in pm.todos:
+            if pt.task_key() == key:
+                if pt.status and pt.status not in ("待办", todo.status):
+                    todo.status = pt.status
+                if pt.status_updated_at:
+                    todo.status_updated_at = pt.status_updated_at
+                if pt.assignee and not todo.assignee:
+                    todo.assignee = pt.assignee
+                if pt.deadline and not todo.deadline:
+                    todo.deadline = pt.deadline
+                if pt.priority and not todo.priority:
+                    todo.priority = pt.priority
+                if pt.history:
+                    seen_h = {(h.date, h.status) for h in todo.history}
+                    for h in pt.history:
+                        if (h.date, h.status) not in seen_h:
+                            todo.history.append(h)
+                            seen_h.add((h.date, h.status))
+                existing_as = set(todo.get_all_assignees())
+                for a in pt.get_all_assignees():
+                    if a and a not in existing_as:
+                        todo.assignees.append(a)
+                        existing_as.add(a)
+                existing_ds = set(todo.get_all_deadlines())
+                for d in pt.get_all_deadlines():
+                    if d and d not in existing_ds:
+                        todo.deadlines.append(d)
+                        existing_ds.add(d)
+                existing_ss = set(todo.get_all_sources())
+                for s in pt.get_all_sources():
+                    if s and s not in existing_ss:
+                        todo.meeting_sources.append(s)
+                        existing_ss.add(s)
+                break
+    if current_meeting_title and current_meeting_title not in todo.get_all_sources():
+        todo.meeting_source = current_meeting_title
 
 
 def _make_dedup_key(task: str, assignee: str, deadline: str) -> str:

@@ -355,7 +355,8 @@ def _direct_merge(merger, all_minutes, title):
                 meeting_source=agenda.meeting_source or source_label,
             ))
 
-    merged.todos = merger._smart_merge_todos(all_minutes, keep_sources=True)
+    todos_result = merger._smart_merge_todos(all_minutes, keep_sources=True)
+    merged.todos = todos_result[0] if isinstance(todos_result, tuple) else todos_result
 
     seen_highlights = set()
     for m in all_minutes:

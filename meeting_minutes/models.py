@@ -4,7 +4,10 @@ import json
 import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+
+
+TODO_STATUS = ["待办", "进行中", "已完成", "延期", "取消"]
 
 
 @dataclass
@@ -39,6 +42,23 @@ class AgendaItem:
 
 
 @dataclass
+class TodoHistory:
+    date: str = ""
+    assignee: str = ""
+    deadline: str = ""
+    status: str = ""
+    meeting: str = ""
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TodoHistory":
+        return cls(**data)
+
+
+@dataclass
 class TodoItem:
     task: str = ""
     assignee: str = ""
@@ -46,18 +66,27 @@ class TodoItem:
     source: str = ""
     priority: str = ""
     meeting_source: str = ""
+    status: str = "待办"
+    status_updated_at: str = ""
     assignees: List[str] = field(default_factory=list)
     deadlines: List[str] = field(default_factory=list)
     meeting_sources: List[str] = field(default_factory=list)
     agenda_source: str = ""
     segment_source: str = ""
+    history: List[TodoHistory] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["history"] = [h.to_dict() for h in self.history]
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "TodoItem":
-        return cls(**data)
+        hist = []
+        for h in data.get("history", []):
+            hist.append(TodoHistory.from_dict(h) if isinstance(h, dict) else h)
+        kwargs = {k: v for k, v in data.items() if k != "history"}
+        return cls(history=hist, **kwargs)
 
     @property
     def missing_fields(self) -> List[str]:
@@ -89,6 +118,40 @@ class TodoItem:
     def display_deadlines(self) -> str:
         all_d = self.get_all_deadlines()
         return "、".join(all_d) if all_d else ""
+
+    def set_status(self, status: str, meeting: str = "", note: str = "") -> bool:
+        if status not in TODO_STATUS:
+            return False
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        hist = TodoHistory(
+            date=now,
+            assignee=self.assignee,
+            deadline=self.deadline,
+            status=self.status,
+            meeting=meeting,
+            note=note,
+        )
+        self.history.append(hist)
+        self.status = status
+        self.status_updated_at = now
+        return True
+
+    def snapshot_history(self, meeting: str = ""):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        hist = TodoHistory(
+            date=now,
+            assignee=self.assignee,
+            deadline=self.deadline,
+            status=self.status,
+            meeting=meeting,
+            note="合并/更新快照",
+        )
+        already_snap = any(
+            h.date == now and h.status == self.status and h.meeting == meeting
+            for h in self.history
+        )
+        if not already_snap:
+            self.history.append(hist)
 
     def task_key(self) -> str:
         STOPWORDS = {"的", "了", "是", "我", "你", "他", "她", "它", "们", "这个", "那个", "这", "那", "就", "都", "就", "要", "去", "做", "搞", "弄", "好", "完", "成", "完成", "做好", "搞定", "一下", "把", "给", "让", "请", "请把", "工作", "任务", "一下", "把", "给", "让", "请", "需要", "必须", "应该", "要", "需", "须"}
@@ -204,7 +267,7 @@ class MeetingMinutes:
     def todos_with_missing(self) -> List[tuple]:
         return [(i + 1, t) for i, t in enumerate(self.todos) if t.missing_fields]
 
-    def update_todo(self, index: int, assignee: Optional[str] = None, deadline: Optional[str] = None) -> bool:
+    def update_todo(self, index: int, assignee: Optional[str] = None, deadline: Optional[str] = None, status: Optional[str] = None) -> bool:
         if index < 1 or index > len(self.todos):
             return False
         todo = self.todos[index - 1]
@@ -212,4 +275,11 @@ class MeetingMinutes:
             todo.assignee = assignee
         if deadline is not None:
             todo.deadline = deadline
+        if status is not None:
+            ok = todo.set_status(status, meeting=self.title)
+            if not ok:
+                return False
         return True
+
+    def get_todos_by_status(self, status: str) -> List[TodoItem]:
+        return [t for t in self.todos if t.status == status]

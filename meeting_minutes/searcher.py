@@ -138,12 +138,20 @@ class Searcher:
 
         all_text = "\n".join(s.content for s in minutes.segments)
 
+        has_assignee_filter = bool(assignee)
+        has_type_filter = type_set is not None
+        has_keyword_filter = bool(keyword)
+
+        if has_assignee_filter and not has_type_filter:
+            type_set = {"待办"}
+
         for agenda_idx, agenda in enumerate(minutes.agendas, 1):
             agenda_ref = f"议题#{agenda_idx} {agenda.title}"
             agenda_source = agenda.meeting_source or meeting_label
 
             if self._should_include_type("议题", type_set):
-                if self._match_keyword(agenda.title, keyword):
+                kw_match = self._match_keyword(agenda.title, keyword)
+                if kw_match:
                     ctx = self._get_context(all_text, agenda.title, 40)
                     matches.append({
                         "type": "议题",
@@ -152,42 +160,50 @@ class Searcher:
                         "meeting": agenda_source,
                         "agenda_ref": agenda_ref,
                     })
-                if self._match_keyword(agenda.content, keyword):
+                if keyword == "":
+                    ctx = agenda.content[:80]
+                else:
+                    kw_match = self._match_keyword(agenda.content, keyword)
                     ctx = self._get_context(agenda.content, keyword, 60) if keyword else agenda.content[:80]
-                    matches.append({
-                        "type": "议题内容",
-                        "content": agenda.content[:100],
-                        "context": ctx,
-                        "meeting": agenda_source,
-                        "agenda_ref": agenda_ref,
-                    })
+                    if kw_match:
+                        matches.append({
+                            "type": "议题内容",
+                            "content": agenda.content[:100],
+                            "context": ctx,
+                            "meeting": agenda_source,
+                            "agenda_ref": agenda_ref,
+                        })
                 for ks in agenda.key_sentences:
-                    if self._should_include_type("要点", type_set) and self._match_keyword(ks, keyword):
-                        ctx = self._get_context(all_text, ks, 40)
-                        matches.append({
-                            "type": "要点",
-                            "content": ks,
-                            "context": ctx,
-                            "meeting": agenda_source,
-                            "agenda_ref": agenda_ref,
-                        })
+                    if self._should_include_type("要点", type_set):
+                        kw_match = self._match_keyword(ks, keyword)
+                        if kw_match:
+                            ctx = self._get_context(all_text, ks, 40)
+                            matches.append({
+                                "type": "要点",
+                                "content": ks,
+                                "context": ctx,
+                                "meeting": agenda_source,
+                                "agenda_ref": agenda_ref,
+                            })
                 for r in agenda.risks:
-                    if self._should_include_type("风险", type_set) and self._match_keyword(r, keyword):
-                        ctx = self._get_context(all_text, r, 40)
-                        matches.append({
-                            "type": "风险",
-                            "content": r,
-                            "context": ctx,
-                            "meeting": agenda_source,
-                            "agenda_ref": agenda_ref,
-                        })
+                    if self._should_include_type("风险", type_set):
+                        kw_match = self._match_keyword(r, keyword)
+                        if kw_match:
+                            ctx = self._get_context(all_text, r, 40)
+                            matches.append({
+                                "type": "风险",
+                                "content": r,
+                                "context": ctx,
+                                "meeting": agenda_source,
+                                "agenda_ref": agenda_ref,
+                            })
 
-        for todo_idx, todo in enumerate(minutes.todos, 1):
-            if self._should_include_type("待办", type_set):
-                task_match = self._match_keyword(todo.task, keyword)
+        if self._should_include_type("待办", type_set):
+            for todo_idx, todo in enumerate(minutes.todos, 1):
+                kw_match = self._match_keyword(todo.task, keyword)
                 todo_assignees = " ".join(todo.get_all_assignees()).lower()
                 assignee_match = (not assignee) or (assignee in todo_assignees)
-                if task_match or assignee_match:
+                if kw_match and assignee_match:
                     ctx = self._get_context(all_text, todo.task, 40)
                     todo_src = todo.get_all_sources() or [meeting_label]
                     matches.append({
@@ -196,6 +212,7 @@ class Searcher:
                         "context": ctx,
                         "assignee": todo.display_assignees(),
                         "deadline": todo.display_deadlines(),
+                        "status": todo.status,
                         "meeting": " | ".join(todo_src),
                         "agenda_ref": todo.agenda_source or "",
                         "segment_ref": todo.segment_source or "",
@@ -204,7 +221,8 @@ class Searcher:
 
         if self._should_include_type("发言", type_set):
             for seg_idx, seg in enumerate(minutes.segments, 1):
-                if self._match_keyword(seg.content, keyword):
+                kw_match = self._match_keyword(seg.content, keyword)
+                if kw_match:
                     ctx = self._get_context(seg.content, keyword, 50) if keyword else seg.content[:80]
                     seg_src = seg.meeting_source or meeting_label
                     matches.append({
@@ -218,7 +236,8 @@ class Searcher:
 
         if self._should_include_type("重点", type_set):
             for h in minutes.highlights:
-                if self._match_keyword(h, keyword):
+                kw_match = self._match_keyword(h, keyword)
+                if kw_match:
                     ctx = self._get_context(all_text, h, 40)
                     matches.append({
                         "type": "重点",
@@ -229,7 +248,8 @@ class Searcher:
 
         if self._should_include_type("风险", type_set):
             for r_idx, r in enumerate(minutes.risks, 1):
-                if self._match_keyword(r, keyword):
+                kw_match = self._match_keyword(r, keyword)
+                if kw_match:
                     in_agenda = any(r in a.risks for a in minutes.agendas)
                     if not in_agenda:
                         ctx = self._get_context(all_text, r, 40)
@@ -324,15 +344,24 @@ class Searcher:
                     "待办": "yellow", "发言": "magenta", "重点": "cyan",
                     "议题内容": "blue",
                 }
+                status_map = {
+                    "待办": "⏳", "进行中": "🔄", "已完成": "✅", "延期": "⚠️", "取消": "❌"
+                }
                 color = type_colors.get(match["type"], "white")
-                lines.append(f"   [{color}]{i:>2}. [{match['type']}][/{color}] {match['content'][:80]}")
+                status_icon = status_map.get(match.get("status", ""), "")
+                status_str = f" {status_icon}" if status_icon else ""
+                lines.append(f"   [{color}]{i:>2}. [{match['type']}][/{color}]{status_str} {match['content'][:80]}")
                 if match.get("context"):
                     ctx = match["context"].replace("\n", " ")
                     lines.append(f"       [dim]上下文：{ctx[:120]}[/]")
                 if match.get("assignee"):
                     assignee = match["assignee"] or "❌ 未指定"
                     deadline = match.get("deadline", "") or "❌ 未指定"
-                    lines.append(f"       [dim]→ {assignee} | {deadline}[/]")
+                    status_val = match.get("status", "") or ""
+                    line_parts = [assignee, deadline]
+                    if status_val:
+                        line_parts.append(status_val)
+                    lines.append(f"       [dim]→ {' | '.join(line_parts)}[/]")
                 if match.get("speaker"):
                     lines.append(f"       [dim]发言人：{match['speaker']}[/]")
                 src_info = []
